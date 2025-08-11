@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>File Compressor & Merger (Combined Fix)</title>
+  <!-- pdf-lib -->
+  <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 1rem; background: #fafafa; }
+    .container { max-width: 720px; margin: 0 auto; background: #fff; padding: 1rem; border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.06); }
+    h1 { font-size: 1.25rem; margin: 0 0 0.75rem; text-align: center; }
+    .controls { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .controls label { font-size: 0.95rem; display:flex; align-items:center; gap:0.5rem; }
+    input[type="file"] { padding: 0.25rem 0; }
+    button { padding: 0.75rem; font-size: 1rem; border-radius: 6px; border: none; background:#007bff; color:#fff; cursor:pointer; }
+    button:active { transform: translateY(1px); }
+    #fileList { margin-top: 0.75rem; list-style: none; padding: 0; font-size: 0.95rem; }
+    .preview { display:flex; flex-wrap:wrap; gap:8px; margin-top: 0.75rem; justify-content:center; }
+    .preview img { width: calc(50% - 8px); max-width: 240px; height: auto; border-radius:6px; border:1px solid #eee; }
+    @media(min-width:600px){ .preview img{ width: calc(25% - 8px); } }
+    .size-info { font-size:0.9rem; color:#444; margin-top:0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>File Compressor & Merger</h1>
+
+    <div class="controls">
+      <label><input type="checkbox" id="combineFiles"> Combine multiple files into single PDF</label>
+      <label><input type="checkbox" id="showSizeInfo"> Show size info (original → compressed)</label>
+      <input type="file" id="fileInput" accept=".jpeg,.jpg,.png,.pdf" multiple />
+      <button id="processBtn">Process Files</button>
+    </div>
+
+    <ul id="fileList"></ul>
+    <div class="preview" id="imagePreview"></div>
+  </div>
+
+  <script>
+  // ---- Elements ----
+  const fileInput = document.getElementById('fileInput');
+  const fileList = document.getElementById('fileList');
+  const imagePreview = document.getElementById('imagePreview');
+  const processBtn = document.getElementById('processBtn');
+
+  // show preview & list on file selection
+  fileInput.addEventListener('change', () => {
+    fileList.innerHTML = '';
+    imagePreview.innerHTML = '';
+    const files = Array.from(fileInput.files);
+    files.forEach(f => {
+      const li = document.createElement('li');
+      li.textContent = f.name;
+      fileList.appendChild(li);
+
+      if (f.type.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.src = URL.createObjectURL(f);
+        imagePreview.appendChild(img);
+      }
+    });
+  });
+
+  // helper: download blob
+  function downloadBlob(blob, filename) {
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(link.href);
+      document.body.removeChild(link);
+    }, 2000);
+  }
+
+  // helper: display size info
+  function displaySizeInfo(originalFile, compressedBlob) {
+    const div = document.createElement('div');
+    div.className = 'size-info';
+    const originalKB = (originalFile.size / 1024).toFixed(1);
+    const compressedKB = (compressedBlob.size / 1024).toFixed(1);
+    div.textContent = `${originalFile.name} — Original: ${originalKB} KB, Compressed: ${compressedKB} KB`;
+    fileList.appendChild(div);
+  }
+
+  // Main process button
+  processBtn.addEventListener('click', processFiles);
+
+  async function processFiles() {
+    const files = Array.from(fileInput.files || []);
+    if (!files.length) { alert('Please select one or more files'); return; }
+
+    const combine = document.getElementById('combineFiles').checked;
+    const showSizeInfo = document.getElementById('showSizeInfo').checked;
+
+    // If combine selected -> merge all uploaded files (in original order) into single PDF
+    if (combine) {
+      await combineAllFilesToPDF(files, 'combined_output.pdf', showSizeInfo);
+      return;
+    }
+
+    // Otherwise process one-by-one (image -> single-page PDF; pdf -> copy & save)
+    for (const file of files) {
+      const nameBase = file.name.replace(/\.[^/.]+$/, '');
+      if (/\.(jpe?g|png)$/i.test(file.name)) {
+        const blob = await imageFileToSinglePagePdfBlob(file); // returns PDF blob
+        if (showSizeInfo) displaySizeInfo(file, blob);
+        downloadBlob(blob, `${nameBase}_compressed.pdf`);
+      } else if (/\.pdf$/i.test(file.name)) {
+        const blob = await copyPdfBlob(file); // returns copied pdf blob
+        if (showSizeInfo) displaySizeInfo(file, blob);
+        downloadBlob(blob, `${nameBase}_compressed.pdf`);
+      } else {
+        console.warn('Unsupported file type:', file.name);
+      }
+    }
+  }
+
+  // Convert a single image file to a one-page PDF blob (A4 scaled, centered)
+  async function imageFileToSinglePagePdfBlob(file) {
+    const mergedPdf = await PDFLib.PDFDocument.create();
+    const arrayBuffer = await file.arrayBuffer();
+
+    let imgEmbed;
+    if (file.type === 'image/png') {
+      imgEmbed = await mergedPdf.embedPng(arrayBuffer);
+    } else { // jpeg
+      imgEmbed = await mergedPdf.embedJpg(arrayBuffer);
+    }
+
+    // A4 in points
+    const pageWidth = 595.28, pageHeight = 841.89, margin = 20;
+    const { width, height } = imgEmbed;
+    const scale = Math.min((pageWidth - margin * 2) / width, (pageHeight - margin * 2) / height, 1);
+    const w = width * scale, h = height * scale;
+    const x = (pageWidth - w) / 2, y = (pageHeight - h) / 2;
+
+    const page = mergedPdf.addPage([pageWidth, pageHeight]);
+    page.drawImage(imgEmbed, { x, y, width: w, height: h });
+
+    const bytes = await mergedPdf.save();
+    return new Blob([bytes], { type: 'application/pdf' });
+  }
+
+  // Copy a PDF file to a new blob (keeps pages as-is)
+  async function copyPdfBlob(file) {
+    const bytes = await file.arrayBuffer();
+    const srcPdf = await PDFLib.PDFDocument.load(bytes);
+    const dstPdf = await PDFLib.PDFDocument.create();
+    const copied = await dstPdf.copyPages(srcPdf, srcPdf.getPageIndices());
+    copied.forEach(p => dstPdf.addPage(p));
+    const outBytes = await dstPdf.save();
+    return new Blob([outBytes], { type: 'application/pdf' });
+  }
+
+  // ---- FIXED: Merge all files (PDFs + images) into ONE PDF, preserving upload order ----
+  async function combineAllFilesToPDF(files, outputName = 'combined_output.pdf', showSizeInfo = false) {
+    // merged PDF container
+    const mergedPdf = await PDFLib.PDFDocument.create();
+
+    // A4 in points (pdf-lib uses points)
+    const PAGE_W = 595.28, PAGE_H = 841.89;
+    const MARGIN = 20;
+
+    // track total original size for display if needed
+    let totalOriginalSize = 0;
+
+    // iterate files in original order
+    for (const file of files) {
+      totalOriginalSize += file.size;
+
+      if (/\.pdf$/i.test(file.name)) {
+        // copy all pages from this PDF into mergedPdf
+        try {
+          const pdfBytes = await file.arrayBuffer();
+          const loaded = await PDFLib.PDFDocument.load(pdfBytes);
+          const copiedPages = await mergedPdf.copyPages(loaded, loaded.getPageIndices());
+          copiedPages.forEach(pg => mergedPdf.addPage(pg));
+        } catch (err) {
+          console.error('Error merging PDF file:', file.name, err);
+        }
+      } else if (/\.(jpe?g|png)$/i.test(file.name)) {
+        // embed image and add as a new A4 page (scaled, centered)
+        try {
+          const imgBytes = await file.arrayBuffer();
+          let img;
+          if (file.type === 'image/png') img = await mergedPdf.embedPng(imgBytes);
+          else img = await mergedPdf.embedJpg(imgBytes);
+
+          const { width, height } = img;
+          const scale = Math.min((PAGE_W - MARGIN * 2) / width, (PAGE_H - MARGIN * 2) / height, 1);
+          const w = width * scale, h = height * scale;
+          const x = (PAGE_W - w) / 2;
+          const y = (PAGE_H - h) / 2;
+
+          const page = mergedPdf.addPage([PAGE_W, PAGE_H]);
+          page.drawImage(img, { x, y, width: w, height: h });
+        } catch (err) {
+          console.error('Error embedding image:', file.name, err);
+        }
+      } else {
+        console.warn('Skipping unsupported file:', file.name);
+      }
+    } // end for
+
+    // finalize
+    const finalBytes = await mergedPdf.save();
+    const finalBlob = new Blob([finalBytes], { type: 'application/pdf' });
+
+    // show size info if requested (we use sum(original) → merged)
+    if (showSizeInfo) {
+      // display a combined size info element
+      const fakeOriginal = { name: outputName, size: totalOriginalSize };
+      displaySizeInfo(fakeOriginal, finalBlob);
+    }
+
+    downloadBlob(finalBlob, outputName);
+  }
+  </script>
+</body>
+</html>
